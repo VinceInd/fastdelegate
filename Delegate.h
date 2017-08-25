@@ -28,7 +28,7 @@ inline OutputClass horrible_cast(const InputClass input){
 
 // Dummy class used for determining function pointer size
 class DummyClass;
-static const int SingleMemberFuncSize = sizeof(void (DummyClass::*)());
+static const size_t SingleMemberFuncSize = sizeof(void (DummyClass::*)());
 
 } // end details namespace
 
@@ -50,9 +50,7 @@ struct DelegateStorage {
     {}
 
     inline details::DummyClass *getThis() const { return m_this; }
-    inline DummyMemFuncType getMemFunc() const {
-        return reinterpret_cast<DummyMemFuncType>(m_func);
-    }
+    inline DummyMemFuncType getMemFunc() const { return m_func; }
 
     void reset() { m_this = nullptr; m_func = nullptr; }
 
@@ -83,26 +81,31 @@ private:
 
 namespace details {
 
-// ClosurePtr<> private wrapper that adds function signature to DelegateStorage
-
 template <class DummyMemFunc, class StaticFuncPtr>
 class Closure : public DelegateStorage {
 public:
+    // Wrapper that adds function signature to DelegateStorage
     // Set delegate to a member function
 
     Closure() = default;
 
-    // Convert member function into a standard form
+    // Store pointer to member
     template <class X, class XMemFunc>
     Closure(X *pthis, XMemFunc func)
-        : DelegateStorage(bindMemFunc(pthis, func))
-    {}
+        : DelegateStorage(reinterpret_cast<DummyClass*>(pthis),
+                          reinterpret_cast<DummyMemFuncType>(func))
+    {
+        static_assert(sizeof(func) == SingleMemberFuncSize,
+                      "Unable to bind method, member size is invalid");
+    }
 
-    template <class DerivedClass, class ParentInvokerSig>
-    Closure(DerivedClass *pParent, ParentInvokerSig staticFuncInvoker,
+    // Store static methods and functions
+    template <class ParentInvokerSig>
+    Closure(ParentInvokerSig staticFuncInvoker,
             StaticFuncPtr func)
-        : DelegateStorage(bindStaticFunction(pParent, staticFuncInvoker, func))
-    {}
+        : DelegateStorage(horrible_cast<DummyClass*>(func),
+                          reinterpret_cast<DummyMemFuncType>((func == nullptr) ? nullptr : staticFuncInvoker))
+    { /* 'Evil': store function pointer in 'this' pointer */ }
 
     inline DummyMemFunc getMemFunc() const {
         return reinterpret_cast<DummyMemFunc>(DelegateStorage::getMemFunc());
@@ -123,25 +126,6 @@ public:
         return (!func) ? empty()
                 : func == getStaticFunc();
     }
-
-private:
-    template <class X, class XMemFunc>
-    inline static DelegateStorage bindMemFunc(X *pthis, XMemFunc func) {
-        static_assert(sizeof(func) == SingleMemberFuncSize,
-                      "Unable to bind method, member size is invalid");
-        return DelegateStorage(reinterpret_cast<DummyClass*>(pthis),
-                  reinterpret_cast<DummyMemFuncType>(func));
-    }
-
-    template <class DerivedClass, class ParentInvokerSig>
-    inline static DelegateStorage bindStaticFunction(DerivedClass *pParent,
-            ParentInvokerSig staticFuncInvoker,
-            StaticFuncPtr func)
-    {
-        // 'Evil': store function pointer in 'this' pointer
-        return DelegateStorage(horrible_cast<DummyClass*>(func),
-                               reinterpret_cast<DummyMemFuncType>((func == nullptr) ? nullptr : staticFuncInvoker));
-    }
 };
 
 } // end namespace detail
@@ -152,7 +136,7 @@ template <typename RetType, typename... Args>
 class Delegate<RetType(Args...)> {
 
     using StaticFuncType = RetType (*) (Args...);
-    using DummyMemFuncType = void (details::DummyClass::*) (Args...);
+    using DummyMemFuncType = RetType(details::DummyClass::*) (Args...);
     using ClosureType = details::Closure<DummyMemFuncType, StaticFuncType>;
 public:
 
@@ -161,49 +145,50 @@ public:
     Delegate(Delegate&& o) = default;
     Delegate(const std::nullptr_t) noexcept : Delegate() {}
 
+    // Non-const pointer and method
     template <class X, class Y>
     Delegate(Y* pthis, RetType (X::* func)(Args...))
         : m_closure(static_cast<X*>(pthis), func)
     {}
 
+    // Non-const pointer, const method
     template <class X, class Y>
     Delegate(Y* pthis, RetType (X::* func)(Args...) const)
         : m_closure(static_cast<X*>(pthis), func)
     {}
 
+    // Const pointer, const method
     template <class X, class Y>
     Delegate(const Y* pthis, RetType (X::* func)(Args...) const)
         : m_closure(const_cast<X*>(pthis), func)
     {}
 
+    // Non-const reference, non-const method
     template <class X, class Y>
     Delegate(Y& p, RetType (X::* func)(Args...))
-        : m_closure(static_cast<X&>(p), func)
+        : m_closure(static_cast<X*>(&p), func)
     {}
 
+    // Non-const reference, const method
     template <class X, class Y>
     Delegate(Y& p, RetType (X::* func)(Args...) const)
-        : m_closure(static_cast<X&>(p), func)
+        : m_closure(static_cast<X*>(&p), func)
     {}
 
-    template <class X, class Y>
-    Delegate(const Y& p, RetType (X::* func)(Args...) const)
-        : m_closure(const_cast<X&>(p), func)
-    {}
-
+    // Static method or function
     Delegate(StaticFuncType func)
-        : m_closure(this, &Delegate::InvokeStaticFunction, func)
+        : m_closure(&Delegate::InvokeStaticFunction, func)
     {}
 
-    // Invoke the delegate when not void
+    // Invoke the delegate
     template <typename ... Args2>
-    RetType operator() (Args2 ... args) const {
+    RetType operator() (Args2&& ... args) const {
         details::DummyClass* obj = m_closure.getThis();
         DummyMemFuncType func     = m_closure.getMemFunc();
-        return (obj->*func)(args...);
+        return (obj->*func)(std::forward<Args2>(args)...);
     }
 
-    void clear() { m_closure.clear(); }
+    void reset() { m_closure.reset(); }
 
     inline bool empty() const { return m_closure.empty(); }
     inline explicit operator bool() const { return !empty(); }
@@ -229,32 +214,22 @@ public:
     }
 
     template <class X, class Y>
-    inline void bind(Y* pthis, RetType (X::* func)(Args...) const) {
-        m_closure = { static_cast<X*>(pthis), func };
-    }
-
-    template <class X, class Y>
     inline void bind(const Y* pthis, RetType (X::* func)(Args...) const) {
         m_closure = { const_cast<X*>(pthis), func };
     }
 
     template <class X, class Y>
     inline void bind(Y& p, RetType (X::* func)(Args...)) {
-        m_closure = { static_cast<X&>(p), func };
+        m_closure = { static_cast<X*>(&p), func };
     }
 
     template <class X, class Y>
     inline void bind(Y& p, RetType (X::* func)(Args...) const) {
-        m_closure = { static_cast<X&>(p), func };
-    }
-
-    template <class X, class Y>
-    inline void bind(const Y& p, RetType (X::* func)(Args...) const) {
-        m_closure = { static_cast<Y&>(p), func };
+        m_closure = { static_cast<X*>(&p), func };
     }
 
     inline void bind(StaticFuncType func) {
-        m_closure = { this, &Delegate::InvokeStaticFunction, func };
+        m_closure = { &Delegate::InvokeStaticFunction, func };
     }
 
     inline Delegate& operator = (StaticFuncType func) {
@@ -265,7 +240,7 @@ public:
 private:
     RetType InvokeStaticFunction(Args ... args) const {
         auto* func = m_closure.getStaticFunc();
-        return (*func)(args...);
+        return (*func)(std::forward<Args>(args)...);
     }
 
     ClosureType m_closure;
@@ -283,6 +258,16 @@ Delegate<RetType(Args...)> MakeDelegate(Y* x, RetType (X::*func)(Args...) const)
 
 template <class X, class Y, typename RetType, typename... Args>
 Delegate<RetType(Args...)> MakeDelegate(const Y* x, RetType (X::*func)(Args...) const) {
+    return Delegate<RetType(Args...)>(x, func);
+}
+
+template <class X, class Y, typename RetType, typename... Args>
+Delegate<RetType(Args...)> MakeDelegate(Y& x, RetType (X::*func)(Args...)) {
+    return Delegate<RetType(Args...)>(x, func);
+}
+
+template <class X, class Y, typename RetType, typename... Args>
+Delegate<RetType(Args...)> MakeDelegate(Y& x, RetType (X::*func)(Args...) const) {
     return Delegate<RetType(Args...)>(x, func);
 }
 
