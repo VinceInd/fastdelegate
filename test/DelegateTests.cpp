@@ -8,6 +8,8 @@
 #include <tuple>
 #include <exception>
 
+#define PRINT_HEX 0
+
 using namespace delly;
 
 template <typename Signature> class Received;
@@ -64,7 +66,10 @@ void TestUnexpectedReceive()
     ASSERT_LT(g_received.size(), g_expected.size());
 }
 
-double ProcessReceived(const std::string& id, int a, const char* b, const std::string& c) {
+double ProcessReceived(size_t magicReceived, size_t magicExpected, const std::string& id, int a, const char* b, const std::string& c) {
+
+    EXPECT_EQ(magicReceived, magicExpected);
+
     TestUnexpectedReceive();
     g_received.emplace_back(id, a, b, c);
     auto& received = g_received.back();
@@ -80,51 +85,58 @@ double ProcessReceived(const std::string& id, int a, const char* b, const std::s
 }
 
 double SimpleFunction1(int a, const char* b, const std::string& c)
-{ return ProcessReceived("SimpleFunction1", a, b, c); }
+{ return ProcessReceived(0, 0, "SimpleFunction1", a, b, c); }
 
 inline double InlinedSimpleFunction2(int a, const char* b, const std::string& c)
-{ return ProcessReceived("InlinedSimpleFunction2", a, b, c); }
+{ return ProcessReceived(0, 0, "InlinedSimpleFunction2", a, b, c); }
 
 static double StaticSimpleFunction3(int a, const char* b, const std::string& c)
-{ return ProcessReceived("StaticSimpleFunction3", a, b, c); }
+{ return ProcessReceived(0, 0, "StaticSimpleFunction3", a, b, c); }
 
 struct NonVirtualClass1
 {
+    static constexpr size_t MAGIC = 0xBEEF0001;
+
     double Method1(int a, const char* b, const std::string& c)
-    { return ProcessReceived("NVC.Method1", a, b, c); }
+    { return ProcessReceived(magic, MAGIC, "NVC.Method1", a, b, c); }
 
     inline double InlineMethod2(int a, const char* b, const std::string& c)
-    { return ProcessReceived("NVC.InlineMethod2", a, b, c); }
+    { return ProcessReceived(magic, MAGIC, "NVC.InlineMethod2", a, b, c); }
 
     double ConstMethod3(int a, const char* b, const std::string& c) const
-    { return ProcessReceived("NVC.ConstMethod3", a, b, c); }
+    { return ProcessReceived(magic, MAGIC, "NVC.ConstMethod3", a, b, c); }
 
     static double StaticMethod1(int a, const char* b, const std::string& c)
-    { return ProcessReceived("NVC.StaticMethod1", a, b, c); }
+    { return ProcessReceived(0, 0, "NVC.StaticMethod1", a, b, c); }
 
     DelegateType GetPrivateMethod() { return MakeDelegate(this, &NonVirtualClass1::PrivateMethod1); }
 
 private:
     double PrivateMethod1(int a, const char* b, const std::string& c)
-    { return ProcessReceived("NVC.PrivateMethod1", a, b, c); }
+    { return ProcessReceived(magic, MAGIC, "NVC.PrivateMethod1", a, b, c); }
+
+    size_t magic = MAGIC;
 };
 
 struct DerivedNonVirtualClass1 : public NonVirtualClass1
 {
+    static constexpr size_t MAGIC = 0xBEEF0002;
+
     double Method4(int a, const char* b, const std::string& c)
-    { return ProcessReceived("DNVC.Method4", a, b, c); }
+    { return ProcessReceived(magic, MAGIC, "DNVC.Method4", a, b, c); }
 
     // hides base method
     inline double InlineMethod2(int a, const char* b, const std::string& c)
-    { return ProcessReceived("DNVC.InlineMethod2", a, b, c); }
+    { return ProcessReceived(magic, MAGIC, "DNVC.InlineMethod2", a, b, c); }
 
     // hides base method
     double ConstMethod3(int a, const char* b, const std::string& c) const
-    { return ProcessReceived("DNVC.ConstMethod3", a, b, c); }
+    { return ProcessReceived(magic, MAGIC, "DNVC.ConstMethod3", a, b, c); }
 
     static double StaticMethod1(int a, const char* b, const std::string& c)
-    { return ProcessReceived("DNVC.StaticMethod1", a, b, c); }
+    { return ProcessReceived(0, 0, "DNVC.StaticMethod1", a, b, c); }
 
+    size_t magic = MAGIC;
 };
 
 //--------------------------------------------------------------------------------
@@ -163,7 +175,7 @@ int DoDump(std::ostringstream& os, const std::vector<T>& vec) {
 
 template <typename... Items>
 void Dump(const Items& ...item) {
-#if 0
+#if PRINT_HEX
     std::ostringstream os;
     int unused[] = { DoDump(os, item)... };
     (void)unused;
@@ -375,6 +387,8 @@ TEST_F(DelegateTestFramework, testDerivedAndHiddenMethods)
     ds.push_back(MakeDelegate(b1, &NonVirtualClass1::ConstMethod3));
     ds.push_back(MakeDelegate(d1, &DerivedNonVirtualClass1::InlineMethod2));
     ds.push_back(MakeDelegate(d1, &DerivedNonVirtualClass1::ConstMethod3));
+    ds.push_back(MakeDelegate(d1, &DerivedNonVirtualClass1::Method4));
+    ds.push_back(MakeDelegate(d1, &DerivedNonVirtualClass1::Method1));
     Dump(ds);
 
     Expect("NVC.InlineMethod2", -1.1, 1000, "a", "A");
@@ -383,6 +397,8 @@ TEST_F(DelegateTestFramework, testDerivedAndHiddenMethods)
     Expect("NVC.ConstMethod3", -4.4, 2000, "d", "D");
     Expect("DNVC.InlineMethod2", -5.5, 200, "e", "E");
     Expect("DNVC.ConstMethod3", -6.6, 20, "f", "F");
+    Expect("DNVC.Method4", -7.7, 30, "g", "G");
+    Expect("NVC.Method1", -8.8, 40, "h", "H");
 
     // Different methods for the same object
     EXPECT_NE(ds[0], ds[4]);
@@ -398,13 +414,15 @@ TEST_F(DelegateTestFramework, testDerivedAndHiddenMethods)
     EXPECT_DOUBLE_EQ(-4.4, ds[3](2000, "d", "D"));
     EXPECT_DOUBLE_EQ(-5.5, ds[4](200, "e", "E"));
     EXPECT_DOUBLE_EQ(-6.6, ds[5](20, "f", "F"));
+    EXPECT_DOUBLE_EQ(-7.7, ds[6](30, "g", "G"));
+    EXPECT_DOUBLE_EQ(-8.8, ds[7](40, "h", "H"));
 }
 
 TEST_F(DelegateTestFramework, testLambda)
 {
     // Method 1 for binding lambdas
     auto l1 = [](int a, const char* b, const std::string& c)
-        { return ProcessReceived("Lambda1", a, b, c); };
+        { return ProcessReceived(0, 0, "Lambda1", a, b, c); };
     DelegateType d1 = { l1 };
 
     Expect("Lambda1", -1.1, 1000, "a", "A");
@@ -414,7 +432,7 @@ TEST_F(DelegateTestFramework, testLambda)
 
     // Method 2 for binding lambdas
     auto l2 = [](int a, const char* b, const std::string& c)
-        { return ProcessReceived("Lambda2", a, b, c); };
+        { return ProcessReceived(0, 0, "Lambda2", a, b, c); };
     DelegateType d2;
     d2.bind(l2);
 
@@ -425,7 +443,7 @@ TEST_F(DelegateTestFramework, testLambda)
 
     // Method 3 for binding lambdas
     DelegateType d3 = MakeDelegate(+[](int a, const char* b, const std::string& c)
-        { return ProcessReceived("Lambda3", a, b, c); });
+        { return ProcessReceived(0, 0, "Lambda3", a, b, c); });
 
     Expect("Lambda3", -3.3, 3000, "a", "A");
     Expect("Lambda3", -2.2, 300, "b", "B");
@@ -476,37 +494,50 @@ TEST_F(DelegateTestFramework, testMoveInvoke)
 
 struct BaseVirtualClass1
 {
+    static constexpr size_t MAGIC = 0xBEEF0002;
+
     ~BaseVirtualClass1() noexcept = default;
 
     double NonVirtualMethod1(int a, const char* b, const std::string& c)
-    { return ProcessReceived("BVC.NonVirtualMethod1", a, b, c); }
+    { return ProcessReceived(magic, MAGIC, "BVC.NonVirtualMethod1", a, b, c); }
 
     virtual double PureVirtualBase1(int a, const char* b, const std::string& c) = 0;
     virtual double PureVirtualBase2(int a, const char* b, const std::string& c) = 0;
 
     virtual double VirtualMethod3(int a, const char* b, const std::string& c)
-    { return ProcessReceived("BVC.VirtualMethod3", a, b, c); }
+    { return ProcessReceived(magic, MAGIC, "BVC.VirtualMethod3", a, b, c); }
+
+    size_t magic = MAGIC;
 };
 
 // Multiple inheritance to adjust this
 template <size_t n>
 struct OtherStuff
 {
+    static constexpr size_t MAGIC = 0xBEEF0003;
+
+    virtual ~OtherStuff() = default;
+
+    size_t magic = MAGIC;
     int foo1[n];
 };
 
 struct DerivedVirtualClass1 : public OtherStuff<8>, public BaseVirtualClass1
 {
+    static constexpr size_t MAGIC = 0xBEEF0004;
+
     double NonVirtualMethod1(int a, const char* b, const std::string& c)
-    { return ProcessReceived("DVC.NonVirtualMethod1", a, b, c); }
+    { return ProcessReceived(magic, MAGIC, "DVC.NonVirtualMethod1", a, b, c); }
 
     double PureVirtualBase1(int a, const char* b, const std::string& c) override
-    { return ProcessReceived("DVC.PureVirtualBase1", a, b, c); }
+    { return ProcessReceived(magic, MAGIC, "DVC.PureVirtualBase1", a, b, c); }
     double PureVirtualBase2(int a, const char* b, const std::string& c) override
-    { return ProcessReceived("DVC.PureVirtualBase2", a, b, c); }
+    { return ProcessReceived(magic, MAGIC, "DVC.PureVirtualBase2", a, b, c); }
 
     double VirtualMethod3(int a, const char* b, const std::string& c) override
-    { return ProcessReceived("DVC.VirtualMethod3", a, b, c); }
+    { return ProcessReceived(magic, MAGIC, "DVC.VirtualMethod3", a, b, c); }
+
+    size_t magic = MAGIC;
 };
 
 TEST_F(DelegateTestFramework, testVirtualMethods)
@@ -525,23 +556,23 @@ TEST_F(DelegateTestFramework, testVirtualMethods)
     ds.push_back(MakeDelegate(&c2, &DerivedVirtualClass1::PureVirtualBase2));
     ds.push_back(MakeDelegate(&c2, &DerivedVirtualClass1::VirtualMethod3));
     ds.push_back(MakeDelegate(b1, &BaseVirtualClass1::NonVirtualMethod1));
-    ds.push_back(MakeDelegate(b1, &DerivedVirtualClass1::PureVirtualBase1));
-    ds.push_back(MakeDelegate(b1, &DerivedVirtualClass1::PureVirtualBase2));
-    ds.push_back(MakeDelegate(b1, &DerivedVirtualClass1::VirtualMethod3));
+    ds.push_back(MakeDelegate(b1, &BaseVirtualClass1::PureVirtualBase1));
+    ds.push_back(MakeDelegate(b1, &BaseVirtualClass1::PureVirtualBase2));
+    ds.push_back(MakeDelegate(b1, &BaseVirtualClass1::VirtualMethod3));
     ds.push_back(MakeDelegate(b2, &BaseVirtualClass1::NonVirtualMethod1));
-    ds.push_back(MakeDelegate(b2, &DerivedVirtualClass1::PureVirtualBase1));
-    ds.push_back(MakeDelegate(b2, &DerivedVirtualClass1::PureVirtualBase2));
-    ds.push_back(MakeDelegate(b2, &DerivedVirtualClass1::VirtualMethod3));
+    ds.push_back(MakeDelegate(b2, &BaseVirtualClass1::PureVirtualBase1));
+    ds.push_back(MakeDelegate(b2, &BaseVirtualClass1::PureVirtualBase2));
+    ds.push_back(MakeDelegate(b2, &BaseVirtualClass1::VirtualMethod3));
     Dump(ds);
 
     EXPECT_NE(ds[0], ds[8]); // Method is non-virtual
-    EXPECT_EQ(ds[1], ds[9]);
-    EXPECT_EQ(ds[2], ds[10]);
-    EXPECT_EQ(ds[3], ds[11]);
+    EXPECT_NE(ds[1], ds[9]);
+    EXPECT_NE(ds[2], ds[10]);
+    EXPECT_NE(ds[3], ds[11]);
     EXPECT_NE(ds[4], ds[12]); // Method is non-virtual
-    EXPECT_EQ(ds[5], ds[13]);
-    EXPECT_EQ(ds[6], ds[14]);
-    EXPECT_EQ(ds[7], ds[15]);
+    EXPECT_NE(ds[5], ds[13]);
+    EXPECT_NE(ds[6], ds[14]);
+    EXPECT_NE(ds[7], ds[15]);
 
     // Instances are different
     EXPECT_NE(ds[0], ds[4]);
@@ -584,23 +615,33 @@ TEST_F(DelegateTestFramework, testVirtualMethods)
     EXPECT_DOUBLE_EQ(16, ds[15](26, "p", "P"));
 }
 
-struct VirtualDerivedVirtualClass1 : public OtherStuff<10>, public virtual BaseVirtualClass1
-{};
-struct VirtualDerivedVirtualClass2 : public OtherStuff<12>, public virtual BaseVirtualClass1
-{};
+struct VirtualDerivedVirtualClass1 : public OtherStuff<0xabcd>, public virtual BaseVirtualClass1
+{
+    static constexpr size_t MAGIC = 0xBEEF0005;
+    size_t magic = MAGIC;
+};
+struct VirtualDerivedVirtualClass2 : public OtherStuff<0xface>, public virtual BaseVirtualClass1
+{
+    static constexpr size_t MAGIC = 0xBEEF0006;
+    size_t magic = MAGIC;
+};
 
 struct VirtualDerivedVirtualClass3 : public VirtualDerivedVirtualClass1, public VirtualDerivedVirtualClass2
 {
+    static constexpr size_t MAGIC = 0xBEEF0007;
+
     double NonVirtualMethod1(int a, const char* b, const std::string& c)
-    { return ProcessReceived("VDVC.NonVirtualMethod1", a, b, c); }
+    { return ProcessReceived(magic, MAGIC, "VDVC.NonVirtualMethod1", a, b, c); }
 
     double PureVirtualBase1(int a, const char* b, const std::string& c) override
-    { return ProcessReceived("VDVC.PureVirtualBase1", a, b, c); }
+    { return ProcessReceived(magic, MAGIC, "VDVC.PureVirtualBase1", a, b, c); }
     double PureVirtualBase2(int a, const char* b, const std::string& c) override
-    { return ProcessReceived("VDVC.PureVirtualBase2", a, b, c); }
+    { return ProcessReceived(magic, MAGIC, "VDVC.PureVirtualBase2", a, b, c); }
 
     double VirtualMethod3(int a, const char* b, const std::string& c) override
-    { return ProcessReceived("VDVC.VirtualMethod3", a, b, c); }
+    { return ProcessReceived(magic, MAGIC, "VDVC.VirtualMethod3", a, b, c); }
+
+    size_t magic = MAGIC;
 };
 
 TEST_F(DelegateTestFramework, testVirtualInheritanceMethods)
@@ -629,13 +670,13 @@ TEST_F(DelegateTestFramework, testVirtualInheritanceMethods)
     Dump(ds);
 
     EXPECT_NE(ds[0], ds[8]); // Method is non-virtual
-    EXPECT_EQ(ds[1], ds[9]);
-    EXPECT_EQ(ds[2], ds[10]);
-    EXPECT_EQ(ds[3], ds[11]);
+    EXPECT_NE(ds[1], ds[9]);
+    EXPECT_NE(ds[2], ds[10]);
+    EXPECT_NE(ds[3], ds[11]);
     EXPECT_NE(ds[4], ds[12]); // Method is non-virtual
-    EXPECT_EQ(ds[5], ds[13]);
-    EXPECT_EQ(ds[6], ds[14]);
-    EXPECT_EQ(ds[7], ds[15]);
+    EXPECT_NE(ds[5], ds[13]);
+    EXPECT_NE(ds[6], ds[14]);
+    EXPECT_NE(ds[7], ds[15]);
 
     // Instances are different
     EXPECT_NE(ds[0], ds[4]);
